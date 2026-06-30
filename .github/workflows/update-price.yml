@@ -1,0 +1,53 @@
+name: Update SPCX price
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch latest price
+        run: |
+          OLD_PRICE=$(jq -r '.priceUsd' data.json)
+          OLD_GBP=$(jq -r '.usdToGbp' data.json)
+
+          PRICE=$(curl -sf -H "User-Agent: Mozilla/5.0" \
+            "https://query2.finance.yahoo.com/v8/finance/chart/SPCX?interval=1d&range=1d" \
+            | jq -r '.chart.result[0].meta.regularMarketPrice')
+
+          GBP=$(curl -sf "https://api.exchangerate-api.com/v4/latest/USD" \
+            | jq -r '.rates.GBP')
+
+          UPDATED=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          jq -n \
+            --argjson price "$PRICE" \
+            --argjson gbp "$GBP" \
+            --arg updated "$UPDATED" \
+            '{priceUsd: $price, usdToGbp: $gbp, updated: $updated}' \
+            > data.json
+
+          echo "SPCX: \$$PRICE | USD→GBP: $GBP"
+
+          if [ "$PRICE" = "$OLD_PRICE" ] && [ "$GBP" = "$OLD_GBP" ]; then
+            echo "No change — skipping commit"
+            exit 0
+          fi
+
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data.json
+          git diff --staged --quiet || git commit -m "Update SPCX price"
+          git push
