@@ -89,12 +89,36 @@
       font-size: 0.8rem;
       color: #556579;
       text-align: center;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+    }
+
+    .live-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #3dd68c;
+      flex-shrink: 0;
+    }
+
+    .live-dot.cached { background: #7a8da6; }
+    .live-dot.loading {
+      background: #fbbf24;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
     }
 
     .error {
       color: #f87171;
       font-size: 0.9rem;
       margin-top: 1rem;
+      text-align: center;
     }
   </style>
 </head>
@@ -126,13 +150,24 @@
       </div>
     </div>
 
-    <p id="updated" class="updated"></p>
+    <p id="updated" class="updated">
+      <span id="live-dot" class="live-dot loading"></span>
+      <span id="updated-text">Loading…</span>
+    </p>
     <p id="error" class="error"></p>
   </main>
 
   <script>
     const SHARES = 10.35758955;
     const COST_GBP = 1200;
+    const REFRESH_MS = 5 * 60 * 1000;
+
+    const YAHOO_URL =
+      "https://query2.finance.yahoo.com/v8/finance/chart/SPCX?interval=1d&range=1d";
+    const FX_URL = "https://api.exchangerate-api.com/v4/latest/USD";
+
+    let lastUpdated = null;
+    let isLive = false;
 
     const fmt = (n) => new Intl.NumberFormat("en-GB", {
       style: "currency",
@@ -146,7 +181,28 @@
       minimumFractionDigits: 2,
     }).format(n);
 
-    function render(data) {
+    function relativeTime(date) {
+      const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+      if (seconds < 10) return "just now";
+      if (seconds < 60) return `${seconds}s ago`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes} min ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ago`;
+      return date.toLocaleString("en-GB");
+    }
+
+    function updateTimestamp() {
+      const text = document.getElementById("updated-text");
+      const dot = document.getElementById("live-dot");
+      if (!lastUpdated) return;
+
+      const prefix = isLive ? "Live · updated " : "Cached · updated ";
+      text.textContent = prefix + relativeTime(lastUpdated);
+      dot.className = "live-dot" + (isLive ? "" : " cached");
+    }
+
+    function render(data, live) {
       const priceUsd = data.priceUsd;
       const usdToGbp = data.usdToGbp;
       const valueGbp = SHARES * priceUsd * usdToGbp;
@@ -161,19 +217,69 @@
       document.getElementById("value").textContent = fmt(valueGbp);
       document.getElementById("price").textContent = fmtUsd(priceUsd);
       document.getElementById("fx").textContent = usdToGbp.toFixed(4);
-      document.getElementById("updated").textContent =
-        "Updated " + new Date(data.updated).toLocaleString("en-GB");
+
+      lastUpdated = new Date(data.updated);
+      isLive = live;
+      updateTimestamp();
+      document.getElementById("error").textContent = "";
     }
 
-    fetch("data.json")
-      .then((r) => {
-        if (!r.ok) throw new Error("Could not load price data");
-        return r.json();
-      })
-      .then(render)
-      .catch((err) => {
-        document.getElementById("error").textContent = err.message;
-      });
+    async function fetchYahooPrice() {
+      const proxyUrl =
+        "https://api.allorigins.win/get?url=" + encodeURIComponent(YAHOO_URL);
+      const res = await fetch(proxyUrl);
+      if (!res.ok) throw new Error("Price fetch failed");
+      const wrapper = await res.json();
+      const chart = JSON.parse(wrapper.contents);
+      const price = chart?.chart?.result?.[0]?.meta?.regularMarketPrice;
+      if (typeof price !== "number") throw new Error("Invalid price data");
+      return price;
+    }
+
+    async function fetchFxRate() {
+      const res = await fetch(FX_URL);
+      if (!res.ok) throw new Error("FX fetch failed");
+      const data = await res.json();
+      const gbp = data?.rates?.GBP;
+      if (typeof gbp !== "number") throw new Error("Invalid FX data");
+      return gbp;
+    }
+
+    async function fetchCached() {
+      const res = await fetch("data.json?t=" + Date.now());
+      if (!res.ok) throw new Error("Could not load cached price data");
+      return res.json();
+    }
+
+    async function refresh() {
+      const dot = document.getElementById("live-dot");
+      dot.className = "live-dot loading";
+
+      try {
+        const [priceUsd, usdToGbp] = await Promise.all([
+          fetchYahooPrice(),
+          fetchFxRate(),
+        ]);
+        render(
+          { priceUsd, usdToGbp, updated: new Date().toISOString() },
+          true
+        );
+      } catch (liveErr) {
+        try {
+          const cached = await fetchCached();
+          render(cached, false);
+          document.getElementById("error").textContent =
+            "Live feed unavailable — showing cached data";
+        } catch {
+          document.getElementById("error").textContent = liveErr.message;
+          dot.className = "live-dot cached";
+        }
+      }
+    }
+
+    refresh();
+    setInterval(refresh, REFRESH_MS);
+    setInterval(updateTimestamp, 30_000);
   </script>
 </body>
 </html>
